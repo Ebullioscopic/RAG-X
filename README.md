@@ -177,9 +177,9 @@ The JSON results from the script can be passed to a larger LLM (e.g., OpenAI GPT
 
 ---
 
-## Author
+## Contributors
 
-Developed by Hariharan Mudaliar. Contributions and suggestions are welcome.
+[![Contributors](https://contrib.rocks/image?repo=Ebullioscopic/RAG-X)](https://github.com/Ebullioscopic/RAG-X/graphs/contributors)
 
 ---
 
