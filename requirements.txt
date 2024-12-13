@@ -13,3 +13,5 @@ pytorch-lightning
 wandb
 einops
 omegaconf
+cachetools
+psutil
