@@ -1,5 +1,5 @@
-import functools
 import re
+import functools
 from sentence_transformers import SentenceTransformer, util
 from concurrent.futures import ThreadPoolExecutor
 from cachetools import LRUCache, cached
@@ -51,12 +51,12 @@ class AdvancedProductSearchModel:
     @cached(cache=functools.partial(LRUCache, maxsize=1000)())
     def search_products(self, query, threshold=0.4, max_results=10):
         """
-        Search for products based on the query
+        Search for products based on the query and rank them by similarity score
         
         :param query: User's search query
         :param threshold: Matching threshold
         :param max_results: Maximum number of results to return
-        :return: List of matching products with relevance scores
+        :return: List of matching products with similarity scores as a JSON list
         """
         query_embedding = self.model.encode(query, convert_to_tensor=True)
         similarities = util.pytorch_cos_sim(query_embedding, self.product_embeddings)[0]
@@ -72,8 +72,17 @@ class AdvancedProductSearchModel:
             for future in futures:
                 matched_products.extend(future.result())
 
-        # Deduplicate and sort results
-        return self._deduplicate_and_sort(matched_products, max_results)
+        # Deduplicate and rank results
+        ranked_results = self._deduplicate_and_sort(matched_products, max_results)
+
+        # Convert to JSON-friendly format
+        return [
+            {
+                "product": result[0],
+                "similarity_score": result[1]
+            }
+            for result in ranked_results
+        ]
 
     def _semantic_matching(self, query, similarities, threshold):
         return [

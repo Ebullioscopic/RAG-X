@@ -11,11 +11,12 @@ def main():
 
     # User query
     query = input("Enter your search query: ")
-    results = search_model.search_products(query)
+    max_results = int(input("Enter the number of results to display: "))
+    
+    results = search_model.search_products(query, max_results=max_results)
 
-    # Display results
-    for product in results:
-        print(json.dumps(product, indent=4))
+    # Display results in ranked order
+    print(json.dumps(results, indent=4))
 
 if __name__ == "__main__":
     main()
