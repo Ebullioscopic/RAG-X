@@ -1,0 +1,15 @@
+sentence-transformers
+scikit-learn
+scikit-image
+transformers
+sentencepiece
+datasets
+tqdm
+pyarrow
+pandas
+torchvision
+torch
+pytorch-lightning
+wandb
+einops
+omegaconf
