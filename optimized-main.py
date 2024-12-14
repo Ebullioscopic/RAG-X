@@ -1,28 +1,58 @@
 import re
 import functools
-from sentence_transformers import SentenceTransformer, util
+import psutil
 from concurrent.futures import ThreadPoolExecutor
+from sentence_transformers import SentenceTransformer, util
 from cachetools import LRUCache, cached
 import json
-import numpy as np
+import math
 
 
 class AdvancedProductSearchModel:
     def __init__(self, products_data):
         """
-        Initialize the advanced product search model
-        
+        Initialize the product search model with query categorization support and multithreading.
+
         :param products_data: List of JSON objects containing product information
         """
         self.products = products_data
         self.model = SentenceTransformer('all-mpnet-base-v2')
         self.product_embeddings = self._compute_comprehensive_embeddings()
         self.cache = LRUCache(maxsize=1000)
+        self.query_categories = {
+            "product_information": [
+                "specifications", "configurations", "features", "details", "availability", "colors", "variants"
+            ],
+            "pricing": ["price", "cost", "cheaper", "under", "affordable"],
+            "offers_discounts": ["offer", "discount", "cashback", "exchange", "deal", "EMI"],
+            "comparisons": ["compare", "better", "difference"],
+            "warranty_services": ["warranty", "repair", "service center"],
+            "delivery": ["delivery", "shipping", "pickup", "logistics"],
+            "technical_queries": ["performance", "gaming", "storage", "expandability"],
+            "user_reviews": ["reviews", "issues", "feedback"],
+            "accessories": ["charger", "compatible accessories"],
+        }
+
+    def _get_optimal_thread_count(self):
+        """
+        Dynamically calculate the optimal number of threads based on system resources.
+
+        :return: Number of threads to use
+        """
+        cpu_count = psutil.cpu_count(logical=True)
+        memory_info = psutil.virtual_memory()
+        available_memory_gb = memory_info.available / (1024 ** 3)  # Convert to GB
+
+        # Threads are proportional to CPU cores, adjusted for memory constraints
+        max_threads_by_cpu = cpu_count * 2  # Assuming hyperthreading
+        max_threads_by_memory = math.floor(available_memory_gb / 0.5)  # Assuming each thread uses 0.5GB
+
+        return min(max_threads_by_cpu, max_threads_by_memory)
 
     def _compute_comprehensive_embeddings(self):
         """
-        Compute embeddings for all products
-        
+        Compute embeddings for all products using multithreading.
+
         :return: List of comprehensive embeddings for all products
         """
         product_texts = [
@@ -35,33 +65,58 @@ class AdvancedProductSearchModel:
             ]))
             for product in self.products
         ]
-        return self.model.encode(product_texts, convert_to_tensor=True)
+
+        thread_count = self._get_optimal_thread_count()
+        print(f"Using {thread_count} threads for embeddings computation.")
+
+        # Multithreaded embedding computation with keyword arguments
+        def compute_embedding(text):
+            return self.model.encode(text, convert_to_tensor=True)
+
+        with ThreadPoolExecutor(max_workers=thread_count) as executor:
+            embeddings = list(executor.map(compute_embedding, product_texts))
+        return embeddings
+
+
+    def _classify_query(self, query):
+        """
+        Classify a query into predefined categories based on keywords and embeddings.
+
+        :param query: User's query as a string.
+        :return: Detected query category.
+        """
+        for category, keywords in self.query_categories.items():
+            if any(keyword in query.lower() for keyword in keywords):
+                return category
+        return "general"
 
     @cached(cache=functools.partial(LRUCache, maxsize=1000)())
     def search_products(self, query, similarity_threshold=0.4, search_depth=50, max_results=10):
         """
-        Search for products based on the query and rank them by similarity score.
-        
+        General search for products based on the query, with multithreading for similarity calculation.
+
         :param query: User's search query
-        :param similarity_threshold: Minimum similarity score for results to be included.
-        :param search_depth: Depth of the search, i.e., how many results to evaluate before ranking.
+        :param similarity_threshold: Minimum similarity score for results.
+        :param search_depth: Depth of the search before ranking.
         :param max_results: Maximum number of results to return.
-        :return: List of matching products with similarity scores as a JSON list.
+        :return: List of matching products with similarity scores as JSON.
         """
         query_embedding = self.model.encode(query, convert_to_tensor=True)
-        similarities = util.pytorch_cos_sim(query_embedding, self.product_embeddings)[0]
 
-        # Filter based on similarity threshold
-        raw_matches = [
-            (self.products[idx], float(similarity))
-            for idx, similarity in enumerate(similarities)
-            if similarity >= similarity_threshold
-        ]
+        thread_count = self._get_optimal_thread_count()
+        print(f"Using {thread_count} threads for similarity computation.")
 
-        # Apply search depth constraint
-        filtered_matches = raw_matches[:search_depth]
+        def compute_similarity(index):
+            return (index, float(util.cos_sim(query_embedding, self.product_embeddings[index])[0][0]))
 
-        # Rank results by similarity scores
+        with ThreadPoolExecutor(max_workers=thread_count) as executor:
+            similarities = list(executor.map(compute_similarity, range(len(self.products))))
+
+        # Filter and rank based on similarity scores
+        filtered_matches = [
+            (self.products[idx], score) for idx, score in similarities if score >= similarity_threshold
+        ][:search_depth]
+
         sorted_matches = sorted(filtered_matches, key=lambda x: x[1], reverse=True)
 
         # Return top `max_results`
@@ -73,119 +128,95 @@ class AdvancedProductSearchModel:
             for match in sorted_matches[:max_results]
         ]
 
-    def _dual_phase_path_optimizer(self, similarities, threshold):
+    def handle_product_information(self, query):
         """
-        Dual Phase Optimization: Samples long paths for global insights 
-        and refines shorter paths for detailed features.
-        """
-        long_path_matches = [
-            (self.products[idx], float(similarity))
-            for idx, similarity in enumerate(similarities)
-            if similarity > threshold
-        ]
-        # Focus on global insights with higher threshold
-        refined_matches = [
-            match for match in long_path_matches if match[1] > threshold + 0.1
-        ]
-        return refined_matches
+        Handle queries related to product information.
 
-    def _density_adaptive_path_sampling(self, matches, similarities):
+        :param query: User's query as a string.
+        :return: Matched product information.
         """
-        Adaptively samples paths based on density within the graph.
-        Critical edges are retained to preserve graph topology.
-        """
-        density_scores = [
-            (match[0], match[1] + (similarities[idx].sum().item() / len(similarities)))
-            for idx, match in enumerate(matches)
-        ]
+        results = self.search_products(query, similarity_threshold=0.5, max_results=5)
+        return [{"product_info": result["product"], "similarity_score": result["similarity_score"]} for result in results]
 
-        # Retain high-density paths
-        retained_matches = [
-            match for match in density_scores if match[1] > np.mean([m[1] for m in density_scores])
-        ]
-        return retained_matches
-
-    def _semantic_conscious_path_structuring(self, matches):
+    def handle_pricing_query(self, query):
         """
-        Aligns paths with natural language patterns for semantic coherence.
-        """
-        semantic_grouped = {}
-        for product, score in matches:
-            group_key = product.get('category', 'default')
-            if group_key not in semantic_grouped:
-                semantic_grouped[group_key] = []
-            semantic_grouped[group_key].append((product, score))
+        Handle queries related to product pricing.
 
-        # Select the most relevant paths from grouped categories
-        final_results = []
-        for group_key, group in semantic_grouped.items():
-            sorted_group = sorted(group, key=lambda x: x[1], reverse=True)
-            final_results.extend(sorted_group)
-        return final_results
-
-    def _get_contextual_density(self, text):
+        :param query: User's query as a string.
+        :return: Price information for relevant products.
         """
-        Calculates contextual density scores for token groups.
-        """
-        token_embeddings = self.model.encode(text.split(), convert_to_tensor=True)
-        scores = util.pytorch_cos_sim(token_embeddings, token_embeddings).sum(dim=1)
-        return scores.mean().item()
+        results = self.search_products(query, similarity_threshold=0.6, max_results=3)
+        price_info = []
+        for result in results:
+            product = result["product"]
+            price_info.append({
+                "name": product.get("name"),
+                "price": product.get("price"),
+                "similarity_score": result["similarity_score"]
+            })
+        return price_info
 
-    def _decode_to_sentence_embeddings(self, query):
+    def handle_offers_discounts(self, query):
         """
-        Decodes query tokens into sentence embeddings for forwarding context to LLMs.
+        Handle queries about offers and discounts.
+
+        :param query: User's query as a string.
+        :return: List of available offers.
         """
-        return self.model.encode(query, convert_to_tensor=True)
+        offers = []
+        for product in self.products:
+            for offer in product.get('offers', []):
+                if query.lower() in offer.get('description', '').lower():
+                    offers.append({
+                        "product": product.get("name"),
+                        "offer_details": offer.get("description"),
+                        "price": product.get("price", "Price not available")
+                    })
+        return offers
 
-    @cached(cache=functools.partial(LRUCache, maxsize=1000)())
-    def search_sub_features(self, query, feature_key, similarity_threshold=0.4):
+    def handle_query(self, query):
         """
-        Search for specific sub-features of the products in the database.
+        Dynamically handle the user's query by determining its category.
 
-        :param query: User's search query
-        :param feature_key: Specific feature to search in the product list.
-        :param similarity_threshold: Minimum similarity score for results to be included.
-        :return: Filtered JSON results based on the feature key.
+        :param query: User's query as a string.
+        :return: Result based on the query category.
         """
-        filtered_products = [
-            {
-                feature_key: product.get(feature_key, "Feature not available"),
-                "product": product.get('name', 'Unnamed product')
-            }
-            for product in self.products if feature_key in product
-        ]
-        query_embedding = self._decode_to_sentence_embeddings(query)
-        feature_texts = [json.dumps(prod) for prod in filtered_products]
-        feature_embeddings = self.model.encode(feature_texts, convert_to_tensor=True)
-        similarities = util.pytorch_cos_sim(query_embedding, feature_embeddings)[0]
+        query_category = self._classify_query(query)
 
-        # Filter by similarity threshold
-        results = [
-            (filtered_products[idx], float(similarity))
-            for idx, similarity in enumerate(similarities)
-            if similarity >= similarity_threshold
-        ]
-        results.sort(key=lambda x: x[1], reverse=True)
+        if query_category == "product_information":
+            return self.handle_product_information(query)
+        elif query_category == "pricing":
+            return self.handle_pricing_query(query)
+        elif query_category == "offers_discounts":
+            return self.handle_offers_discounts(query)
+        else:
+            return self.search_products(query, similarity_threshold=0.4)
 
-        return [
-            {
-                "feature": result[0],
-                "similarity_score": result[1]
-            }
-            for result in results[:10]
-        ]
+    def pretty_print_results(self, results):
+        """
+        Pretty print the results for user-friendly display.
+
+        :param results: Results to print.
+        """
+        for result in results:
+            print(json.dumps(result, indent=4))
 
 
-# Example usage
+# Example Usage
 if __name__ == "__main__":
     with open('/Users/admin63/Python-Programs/RAG-X/data/products.json', 'r') as file:
         products_data = json.load(file)
 
     search_model = AdvancedProductSearchModel(products_data)
-    #query = "Smartphones with 64MP camera under ₹20,000"
-    query = "Which is better S21 Ultra or S21+?"
-    # Search with similarity threshold and depth
-    results = search_model.search_products(query, similarity_threshold=0.6, search_depth=20, max_results=5)
 
-    for result in results:
-        print(json.dumps(result, indent=0))
+    queries = [
+        "What are the specifications of the SAMSUNG Galaxy F15 5G?",
+        "What is the price of the SAMSUNG Galaxy F15 5G with 6 GB RAM?",
+        "Are there any exchange offers for this phone?",
+        "Is there any phone under ₹15,000 with similar specifications?"
+    ]
+
+    for query in queries:
+        print(f"\nQuery: {query}")
+        results = search_model.handle_query(query)
+        search_model.pretty_print_results(results)
